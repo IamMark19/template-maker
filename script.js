@@ -5,7 +5,6 @@ const exportTechBtn = document.getElementById('exportTechBtn');
 const clearBtn = document.getElementById('clearBtn');
 
 let rawData = [];
-let groupedRows = [];
 
 fileInput.addEventListener('change', handleFile, false);
 exportBtn.addEventListener('click', () => handleExport(false), false);
@@ -23,7 +22,6 @@ function parseHyperlinkFormula(f) {
     return null;
 }
 
-// Utility function to format date as M/D/YY (e.g., 7/30/26)
 function getFormattedTodayDate() {
     const today = new Date();
     const month = today.getMonth() + 1;
@@ -47,7 +45,6 @@ function handleFile(e) {
             const range = XLSX.utils.decode_range(sheet['!ref']);
             let headerRowIndex = -1;
 
-            // 1. Locate the header row containing "Department"
             for (let r = range.s.r; r <= range.e.r; r++) {
                 for (let c = range.s.c; c <= range.e.c; c++) {
                     const cell = sheet[XLSX.utils.encode_cell({ r, c })];
@@ -62,15 +59,15 @@ function handleFile(e) {
 
             if (headerRowIndex === -1) headerRowIndex = range.s.r;
 
-            // 2. Extract column header titles
             const headersRaw = [];
             for (let c = range.s.c; c <= range.e.c; c++) {
                 const cell = sheet[XLSX.utils.encode_cell({ r: headerRowIndex, c })];
                 headersRaw.push(cell ? XLSX.utils.format_cell(cell).trim() : `Column${c + 1}`);
             }
 
-            // 3. Process data rows AS-IS for preview
             const jsonData = [];
+            let currentDepartment = "";
+
             for (let r = headerRowIndex + 1; r <= range.e.r; r++) {
                 const rowObj = {};
                 let rowHasValue = false;
@@ -78,7 +75,6 @@ function handleFile(e) {
                 for (let c = range.s.c; c <= range.e.c; c++) {
                     let colName = headersRaw[c - range.s.c];
 
-                    // Standardize header names
                     if (colName === "Change ID Caused By Request") colName = "Change ID";
                     if (colName === "Change Title Caused By Request" || colName === "Subject") colName = "Description";
 
@@ -99,22 +95,22 @@ function handleFile(e) {
                     }
                 }
 
+                // Handle missing department rows (propagate previous department)
+                const deptVal = rowObj["Department"];
+                const parsedDept = isHyperlinkObj(deptVal) ? deptVal.text : String(deptVal || "").trim();
+                if (parsedDept) {
+                    currentDepartment = parsedDept;
+                } else {
+                    rowObj["Department"] = currentDepartment;
+                }
+
                 if (rowHasValue) {
                     jsonData.push(rowObj);
                 }
             }
 
             rawData = jsonData;
-            groupedRows = groupByDepartment(jsonData);
-
-            // Preview UI default layout
-            const previewHeaders = [
-                'Change Type', 'RequestID', 'Change ID', 
-                'Description', 'Requester', 'UAT Owner', 
-                'UAT Date', 'Request Status'
-            ];
-
-            renderPreview(previewHeaders, groupedRows);
+            renderEditableTable(rawData);
 
             exportBtn.disabled = false;
             exportTechBtn.disabled = false;
@@ -125,6 +121,67 @@ function handleFile(e) {
         }
     };
     reader.readAsArrayBuffer(f);
+}
+
+function renderEditableTable(data) {
+    tableContainer.innerHTML = "";
+
+    const headers = [
+        'Department', 'Change Type', 'RequestID', 'Change ID', 
+        'Description', 'Technician', 'Requester', 'UAT Owner', 
+        'UAT Date', 'Request Status'
+    ];
+
+    const table = document.createElement('table');
+    table.className = "editable-table";
+
+    // Header Row
+    const thead = document.createElement('thead');
+    const headerTr = document.createElement('tr');
+    headers.forEach(h => {
+        const th = document.createElement('th');
+        th.textContent = h;
+        headerTr.appendChild(th);
+    });
+    thead.appendChild(headerTr);
+    table.appendChild(thead);
+
+    // Editable Body Rows
+    const tbody = document.createElement('tbody');
+
+    data.forEach((row, rowIndex) => {
+        const tr = document.createElement('tr');
+
+        headers.forEach(header => {
+            const td = document.createElement('td');
+            td.contentEditable = "true";
+            
+            const cellVal = row[header];
+
+            if (isHyperlinkObj(cellVal)) {
+                td.innerHTML = `<a href="${cellVal.hyperlink}" target="_blank" style="color:#0000ff; text-decoration:underline;">${cellVal.text || cellVal.hyperlink}</a>`;
+            } else {
+                td.textContent = cellVal || "";
+            }
+
+            // Update underlying dataset on cell edit
+            td.addEventListener('blur', () => {
+                const updatedText = td.textContent.trim();
+                if (isHyperlinkObj(row[header])) {
+                    row[header].text = updatedText;
+                } else {
+                    row[header] = updatedText;
+                }
+            });
+
+            tr.appendChild(td);
+        });
+
+        tbody.appendChild(tr);
+    });
+
+    table.appendChild(tbody);
+    tableContainer.appendChild(table);
 }
 
 function groupByDepartment(rows) {
@@ -151,35 +208,6 @@ function groupByDepartment(rows) {
     }
     if (currentDept) groups.push({ department: currentDept, rows: currentRows });
     return groups;
-}
-
-function renderPreview(headers, groups) {
-    tableContainer.innerHTML = "";
-
-    const table = document.createElement('table');
-    let thead = `<thead><tr>${headers.map(h => `<th>${h}</th>`).join('')}</tr></thead>`;
-    let tbody = "<tbody>";
-
-    groups.forEach(group => {
-        // Department Group Banner
-        tbody += `<tr><td colspan="${headers.length}" style="background:#5451e0; color:white; font-weight:bold; text-align:left; padding:8px 12px;">${group.department}</td></tr>`;
-        
-        group.rows.forEach(row => {
-            tbody += "<tr>";
-            headers.forEach(h => {
-                const val = row[h];
-                if (isHyperlinkObj(val)) {
-                    tbody += `<td><a href="${val.hyperlink}" target="_blank" style="color:#0000ff; text-decoration:underline;">${val.text || val.hyperlink}</a></td>`;
-                } else {
-                    tbody += `<td>${val || ""}</td>`;
-                }
-            });
-            tbody += "</tr>";
-        });
-    });
-
-    table.innerHTML = thead + tbody + "</tbody>";
-    tableContainer.appendChild(table);
 }
 
 async function handleExport(includeTechnician) {
@@ -211,7 +239,7 @@ async function handleExport(includeTechnician) {
 
     if (includeTechnician) {
         // ==========================================
-        // 1. EXPORT WITH TECHNICIAN (FLAT TABLE)
+        // EXPORT WITH TECHNICIAN (FLAT TABLE)
         // ==========================================
         const exportHeaders = [
             'Department', 'Change Type', 'RequestID', 'Change ID', 
@@ -219,7 +247,6 @@ async function handleExport(includeTechnician) {
             'UAT Date', 'Request Status'
         ];
 
-        // Header Row
         const hRow = sheet.addRow(exportHeaders);
         hRow.height = 24;
         hRow.eachCell(c => {
@@ -228,11 +255,9 @@ async function handleExport(includeTechnician) {
             c.alignment = { vertical: 'middle', horizontal: 'left' };
         });
 
-        // Add Data Rows directly (flat layout)
         rawData.forEach(row => {
             const exportRow = { ...row };
 
-            // Rules:
             const reqVal = exportRow['Requester'];
             exportRow['UAT Owner'] = isHyperlinkObj(reqVal) ? (reqVal.text || reqVal.hyperlink) : reqVal;
             exportRow['UAT Date'] = exportDateStr;
@@ -261,7 +286,6 @@ async function handleExport(includeTechnician) {
             });
         });
 
-        // Set column widths
         const customWidths = {
             'Department': 25,
             'Change Type': 15,
@@ -282,7 +306,7 @@ async function handleExport(includeTechnician) {
 
     } else {
         // ==========================================
-        // 2. STANDARD EXPORT (GROUPED BANNERS)
+        // STANDARD EXPORT (GROUPED BANNERS)
         // ==========================================
         const exportHeaders = [
             'Change Type', 'RequestID', 'Change ID', 
@@ -290,7 +314,6 @@ async function handleExport(includeTechnician) {
             'UAT Date', 'Request Status'
         ];
 
-        // Main Header Row
         const hRow = sheet.addRow(exportHeaders);
         hRow.height = 24;
         hRow.eachCell(c => {
@@ -299,8 +322,9 @@ async function handleExport(includeTechnician) {
             c.alignment = { vertical: 'middle', horizontal: 'left' };
         });
 
-        // Department Banner & Rows
-        groupedRows.forEach(group => {
+        const grouped = groupByDepartment(rawData);
+
+        grouped.forEach(group => {
             const dRow = sheet.addRow([group.department]);
             dRow.height = 20;
             sheet.mergeCells(dRow.number, 1, dRow.number, exportHeaders.length);
@@ -342,7 +366,6 @@ async function handleExport(includeTechnician) {
             });
         });
 
-        // Set column widths
         const customWidths = {
             'Change Type': 15,
             'RequestID': 16,
@@ -367,7 +390,6 @@ async function handleExport(includeTechnician) {
 
 function clearPreview() {
     rawData = []; 
-    groupedRows = [];
     fileInput.value = "";
     tableContainer.innerHTML = '<div class="placeholder"><p>hehehehe</p></div>';
     exportBtn.disabled = true;
