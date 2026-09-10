@@ -6,10 +6,35 @@ const clearBtn = document.getElementById('clearBtn');
 
 let rawData = [];
 
-fileInput.addEventListener('change', handleFile, false);
+// Event Listeners
+fileInput.addEventListener('change', (e) => processSelectedFile(e.target.files[0]), false);
 exportBtn.addEventListener('click', () => handleExport(false), false);
 exportTechBtn.addEventListener('click', () => handleExport(true), false);
 clearBtn.addEventListener('click', clearPreview, false);
+
+// Drag & Drop Handling
+['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+    tableContainer.addEventListener(eventName, preventDefaults, false);
+});
+
+function preventDefaults(e) {
+    e.preventDefault();
+    e.stopPropagation();
+}
+
+['dragenter', 'dragover'].forEach(eventName => {
+    tableContainer.addEventListener(eventName, () => tableContainer.classList.add('drag-over'), false);
+});
+
+['dragleave', 'drop'].forEach(eventName => {
+    tableContainer.addEventListener(eventName, () => tableContainer.classList.remove('drag-over'), false);
+});
+
+tableContainer.addEventListener('drop', (e) => {
+    const dt = e.dataTransfer;
+    const file = dt.files[0];
+    if (file) processSelectedFile(file);
+});
 
 function isHyperlinkObj(v) { 
     return v && typeof v === "object" && !!v.hyperlink; 
@@ -30,8 +55,31 @@ function getFormattedTodayDate() {
     return `${month}/${day}/${year}`;
 }
 
-function handleFile(e) {
-    const f = e.target.files[0];
+// Sanitization ONLY for Linked Request ID and Title fields
+function sanitizeLinkedValue(val) {
+    if (!val) return "";
+    const str = String(val).trim();
+    const lower = str.toLowerCase();
+    
+    if (lower === "not assigned" || lower === "https://techassist.bounty.org.ph/app/itdesk/ui/requests/-1/details") {
+        return "";
+    }
+    return str;
+}
+
+// Check if any row has valid data specifically for a given column
+function hasValidDataForColumn(data, colKey) {
+    return data.some(row => {
+        const val = row[colKey];
+        if (!val) return false;
+        if (isHyperlinkObj(val)) {
+            return !!(val.text || val.hyperlink);
+        }
+        return !!val;
+    });
+}
+
+function processSelectedFile(f) {
     if (!f) return;
     const reader = new FileReader();
 
@@ -75,8 +123,13 @@ function handleFile(e) {
                 for (let c = range.s.c; c <= range.e.c; c++) {
                     let colName = headersRaw[c - range.s.c];
 
+                    // Standard Name Replacements
                     if (colName === "Change ID Caused By Request") colName = "Change ID";
                     if (colName === "Change Title Caused By Request" || colName === "Subject") colName = "Description";
+                    
+                    // Special Release Request ID & Title Replacements
+                    if (colName === "Linked Request ID") colName = "Special Release Request ID";
+                    if (colName === "Linked Request Title") colName = "Special Release Request Title";
 
                     const cell = sheet[XLSX.utils.encode_cell({ r, c })];
                     if (!cell) { rowObj[colName] = ""; continue; }
@@ -86,16 +139,34 @@ function handleFile(e) {
                         ? { text: text || cell.l.Target, hyperlink: cell.l.Target } 
                         : parseHyperlinkFormula(cell.f);
 
+                    // Apply "Not Assigned" / -1 URL filter ONLY to Special Release fields
+                    const isSpecialCol = (colName === "Special Release Request ID" || colName === "Special Release Request Title");
+
                     if (linkObj) {
-                        rowObj[colName] = linkObj;
-                        if (String(linkObj.text || "").trim()) rowHasValue = true;
+                        const cleanText = isSpecialCol ? sanitizeLinkedValue(linkObj.text) : (linkObj.text ? String(linkObj.text).trim() : "");
+                        const cleanLink = isSpecialCol ? sanitizeLinkedValue(linkObj.hyperlink) : (linkObj.hyperlink ? String(linkObj.hyperlink).trim() : "");
+
+                        if (!cleanText && !cleanLink) {
+                            rowObj[colName] = "";
+                        } else {
+                            rowObj[colName] = { text: cleanText || cleanLink, hyperlink: cleanLink };
+                            rowHasValue = true;
+                        }
                     } else {
-                        rowObj[colName] = text;
-                        if (String(text).trim()) rowHasValue = true;
+                        const cleanVal = isSpecialCol ? sanitizeLinkedValue(text) : (text ? String(text).trim() : "");
+                        rowObj[colName] = cleanVal;
+                        if (cleanVal) rowHasValue = true;
                     }
                 }
 
-                // Handle missing department rows (propagate previous department)
+                // Fallback Logic: If RequestID or Description are empty, fallback to Special Release Request values
+                if (!rowObj['RequestID'] && rowObj['Special Release Request ID']) {
+                    rowObj['RequestID'] = rowObj['Special Release Request ID'];
+                }
+                if (!rowObj['Description'] && rowObj['Special Release Request Title']) {
+                    rowObj['Description'] = rowObj['Special Release Request Title'];
+                }
+
                 const deptVal = rowObj["Department"];
                 const parsedDept = isHyperlinkObj(deptVal) ? deptVal.text : String(deptVal || "").trim();
                 if (parsedDept) {
@@ -117,27 +188,42 @@ function handleFile(e) {
             clearBtn.disabled = false;
         } catch (err) {
             console.error(err);
-            alert('Failed to parse Excel file.');
+            alert('Failed to parse file.');
         }
     };
     reader.readAsArrayBuffer(f);
 }
 
+function getActiveHeaders(data, includeDepartment = true, includeTechnician = true) {
+    const hasSpecialTitle = hasValidDataForColumn(data, 'Special Release Request Title');
+    const hasSpecialID = hasValidDataForColumn(data, 'Special Release Request ID');
+    const includeSpecial = hasSpecialTitle || hasSpecialID;
+
+    const baseHeaders = [];
+
+    if (includeDepartment) baseHeaders.push('Department');
+    baseHeaders.push('Change Type', 'RequestID', 'Change ID', 'Description');
+
+    if (includeSpecial) {
+        baseHeaders.push('Special Release Request ID', 'Special Release Request Title');
+    }
+
+    if (includeTechnician) baseHeaders.push('Technician');
+
+    baseHeaders.push('Requester', 'UAT Owner', 'UAT Date', 'Request Status');
+
+    return baseHeaders;
+}
+
 function renderEditableTable(data) {
     tableContainer.innerHTML = "";
 
-    const headers = [
-        'Department', 'Change Type', 'RequestID', 'Change ID', 
-        'Description', 'Technician', 'Requester', 'UAT Owner', 
-        'UAT Date', 'Request Status'
-    ];
+    const headers = getActiveHeaders(data, true, true);
 
     const table = document.createElement('table');
-    table.className = "editable-table";
-
-    // Header Row
     const thead = document.createElement('thead');
     const headerTr = document.createElement('tr');
+    
     headers.forEach(h => {
         const th = document.createElement('th');
         th.textContent = h;
@@ -146,10 +232,9 @@ function renderEditableTable(data) {
     thead.appendChild(headerTr);
     table.appendChild(thead);
 
-    // Editable Body Rows
     const tbody = document.createElement('tbody');
 
-    data.forEach((row, rowIndex) => {
+    data.forEach((row) => {
         const tr = document.createElement('tr');
 
         headers.forEach(header => {
@@ -159,12 +244,11 @@ function renderEditableTable(data) {
             const cellVal = row[header];
 
             if (isHyperlinkObj(cellVal)) {
-                td.innerHTML = `<a href="${cellVal.hyperlink}" target="_blank" style="color:#0000ff; text-decoration:underline;">${cellVal.text || cellVal.hyperlink}</a>`;
+                td.innerHTML = `<a href="${cellVal.hyperlink}" target="_blank">${cellVal.text || cellVal.hyperlink}</a>`;
             } else {
                 td.textContent = cellVal || "";
             }
 
-            // Update underlying dataset on cell edit
             td.addEventListener('blur', () => {
                 const updatedText = td.textContent.trim();
                 if (isHyperlinkObj(row[header])) {
@@ -236,16 +320,15 @@ async function handleExport(includeTechnician) {
     };
 
     const exportDateStr = getFormattedTodayDate();
+    const customWidths = {
+        'Department': 25, 'Change Type': 15, 'RequestID': 16,
+        'Change ID': 14, 'Description': 65, 'Special Release Request ID': 22,
+        'Special Release Request Title': 42, 'Technician': 22,
+        'Requester': 22, 'UAT Owner': 22, 'UAT Date': 14, 'Request Status': 16
+    };
 
     if (includeTechnician) {
-        // ==========================================
-        // EXPORT WITH TECHNICIAN (FLAT TABLE)
-        // ==========================================
-        const exportHeaders = [
-            'Department', 'Change Type', 'RequestID', 'Change ID', 
-            'Description', 'Technician', 'Requester', 'UAT Owner', 
-            'UAT Date', 'Request Status'
-        ];
+        const exportHeaders = getActiveHeaders(rawData, true, true);
 
         const hRow = sheet.addRow(exportHeaders);
         hRow.height = 24;
@@ -257,7 +340,6 @@ async function handleExport(includeTechnician) {
 
         rawData.forEach(row => {
             const exportRow = { ...row };
-
             const reqVal = exportRow['Requester'];
             exportRow['UAT Owner'] = isHyperlinkObj(reqVal) ? (reqVal.text || reqVal.hyperlink) : reqVal;
             exportRow['UAT Date'] = exportDateStr;
@@ -286,33 +368,13 @@ async function handleExport(includeTechnician) {
             });
         });
 
-        const customWidths = {
-            'Department': 25,
-            'Change Type': 15,
-            'RequestID': 16,
-            'Change ID': 14,
-            'Description': 65,
-            'Technician': 22,
-            'Requester': 22,
-            'UAT Owner': 22,
-            'UAT Date': 14,
-            'Request Status': 16
-        };
-
         sheet.columns.forEach((col, idx) => {
             const headerName = exportHeaders[idx];
             col.width = customWidths[headerName] || 20;
         });
 
     } else {
-        // ==========================================
-        // STANDARD EXPORT (GROUPED BANNERS)
-        // ==========================================
-        const exportHeaders = [
-            'Change Type', 'RequestID', 'Change ID', 
-            'Description', 'Requester', 'UAT Owner', 
-            'UAT Date', 'Request Status'
-        ];
+        const exportHeaders = getActiveHeaders(rawData, false, false);
 
         const hRow = sheet.addRow(exportHeaders);
         hRow.height = 24;
@@ -336,7 +398,6 @@ async function handleExport(includeTechnician) {
 
             group.rows.forEach(row => {
                 const exportRow = { ...row };
-
                 const reqVal = exportRow['Requester'];
                 exportRow['UAT Owner'] = isHyperlinkObj(reqVal) ? (reqVal.text || reqVal.hyperlink) : reqVal;
                 exportRow['UAT Date'] = exportDateStr;
@@ -366,17 +427,6 @@ async function handleExport(includeTechnician) {
             });
         });
 
-        const customWidths = {
-            'Change Type': 15,
-            'RequestID': 16,
-            'Change ID': 14,
-            'Description': 65,
-            'Requester': 22,
-            'UAT Owner': 22,
-            'UAT Date': 14,
-            'Request Status': 16
-        };
-
         sheet.columns.forEach((col, idx) => {
             const headerName = exportHeaders[idx];
             col.width = customWidths[headerName] || 20;
@@ -391,7 +441,11 @@ async function handleExport(includeTechnician) {
 function clearPreview() {
     rawData = []; 
     fileInput.value = "";
-    tableContainer.innerHTML = '<div class="placeholder"><p>hehehehe</p></div>';
+    tableContainer.innerHTML = `
+      <div class="placeholder" id="dropZone">
+        <div class="placeholder-icon">📂</div>
+        <p>Upload or drag & drop a file here to preview its contents.</p>
+      </div>`;
     exportBtn.disabled = true;
     exportTechBtn.disabled = true;
     clearBtn.disabled = true;
